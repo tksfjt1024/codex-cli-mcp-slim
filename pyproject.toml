@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-cli-mcp-slim"
+version = "0.1.0"
+description = "A thin, auditable MCP server wrapping the Codex CLI (codex exec). Same tools as the deprecated `codex mcp-server`; forward-compatible with future CLI flags via extra_args passthrough."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "tksfjt1024", email = "tksfjt1024@gmail.com" },
+]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "codex",
+    "codex-cli",
+    "openai",
+    "claude",
+    "anthropic",
+    "ai",
+    "llm",
+    "coding-agent",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
+dependencies = [
+    "mcp>=2.0.0,<3",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+dev = [
+    "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/tksfjt1024/codex-cli-mcp-slim"
+Repository = "https://github.com/tksfjt1024/codex-cli-mcp-slim"
+Issues = "https://github.com/tksfjt1024/codex-cli-mcp-slim/issues"
+
+[project.scripts]
+codex-cli-mcp-slim = "codex_cli_mcp_slim.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+codex_cli_mcp_slim = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
