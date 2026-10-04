@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-cli-mcp-slim"
-version = "0.1.0"
+version = "0.1.1"
 description = "A thin, auditable MCP server wrapping the Codex CLI (codex exec). Same tools as the deprecated `codex mcp-server`; forward-compatible with future CLI flags via extra_args passthrough."
 readme = "README.md"
 requires-python = ">=3.10"

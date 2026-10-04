@@ -136,7 +136,9 @@ After:
 Parameter names differ from the old server where `codex exec` names the flag
 differently: `cwd` is now `cd` (the `-C/--cd` flag), and `codex-reply` takes
 `thread_id` instead of `threadId`. The result's `structuredContent` field keeps
-the shape the old server returned, `{"threadId": ..., "content": ...}`.
+the shape the old server returned, `{"threadId": ..., "content": ...}`. It
+gains an `ignoredParameters` key only when the server's own flags overrode a
+per-call parameter (see [Server-level flags](#server-level-flags)).
 
 ### Other MCP clients
 
@@ -172,11 +174,25 @@ in reasoning effort look like this:
 
 A call to `codex-high` runs
 `codex exec -c model_reasoning_effort=high [per-call flags] --json -`. Per-call
-flags come after the server-level ones, and `-c` may repeat with the last one
-winning, so a per-call `config` entry overrides a server-level `-c`. Single-value
-flags such as `-m` and `-C` may not repeat: `codex` rejects the second one, and
-the tool result carries that error. Keep server-level flags and per-call
-parameters disjoint for those.
+flags come after the server-level ones. `-c` and `--add-dir` may repeat. For
+`-c` the last one wins, so a per-call `config` entry overrides a server-level
+`-c`.
+
+The other typed flags (`-C`, `-m`, `--sandbox`, `-p`, `--ephemeral`,
+`--skip-git-repo-check`) may appear only once: `codex` exits with "cannot be used
+multiple times" on a second one. When the server's command line already sets one
+of them, in any spelling (for example `-C DIR`, `-CDIR`, `--cd=DIR`), the
+server-level value wins. A token that is another flag's value (the `-m` in
+`-c -m`) or that comes after `--` does not count as setting a flag. The `codex`
+tool leaves the matching per-call parameter (`cd`, `model`, `sandbox`,
+`profile`, `ephemeral`, `skip_git_repo_check`) out of the command and names it
+in the result together with the server-level value used instead: in the text
+after the `[codex]` line (`cd="/other"; this server runs with -C /srv`) and in
+`structuredContent.ignoredParameters`. Its schema tells the caller which
+parameters the server already sets, and to what. `codex-reply` keeps such
+parameters, because after `resume` they are the subcommand's own flags and
+`codex` accepts them there. `extra_args` is passed through unchecked, so a flag
+repeated through it still fails with `codex`'s own error.
 
 ## Tool: `codex`
 
@@ -191,7 +207,10 @@ The tool returns that final message followed by one metadata line:
 ```
 
 `thread_id` and `status` are always present; the token fields appear when the
-run reported them. `isError` is the flag on an MCP tool result that tells the
+run reported them. A per-call parameter that a server-level flag overrode is
+named after this line, with the value used instead (see
+[Server-level flags](#server-level-flags)).
+`isError` is the flag on an MCP tool result that tells the
 client a call failed. This server sets it when `codex` exited non-zero, when the
 subprocess timed out, and when the turn itself failed. The last case matters
 because `codex exec` exits 0 after a failure inside the model API; the tool

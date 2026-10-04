@@ -181,10 +181,25 @@ regression test is in `tests/test_basic.py`.
 
 ### Single-value flags may not repeat
 
-`codex` rejects a second `-m` or `-C` ("cannot be used multiple times"), while
-`-c` repeats with the last one winning. A server-level `-C` combined with a
-per-call `cd` therefore fails, and the tool result shows codex's error. The
-README documents the rule instead of the server silently dropping one of them.
+`codex` exits 2 on a second `-C`, `-m`, `--sandbox`, `-p`, `--ephemeral` or
+`--skip-git-repo-check` ("cannot be used multiple times"), whatever mix of
+spellings carries them. `-c` and `--add-dir` repeat (for `-c` the last one
+wins). On a `codex` call, `_build_argv` therefore leaves out a per-call parameter
+whose flag the server-level flags already carry (`_SINGLE_USE_FLAGS`,
+`_params_set_by`): the server-level value wins because whoever started the
+server fixed it. `_params_set_by` reads the token after each option in
+`_VALUE_FLAGS` as that option's value and stops at `--`, so the `-m` in `-c -m`
+is not taken for the model flag. `main` parses the server's command line once
+(`_set_server_args`), and `_build_argv`, `_invoke` and `on_list_tools` all read
+that result (`_SERVER_SET`). Dropping a parameter silently would hide that the
+call ran with a value other than it asked for. `_invoke` therefore names each
+dropped parameter with the server-level value used instead, after the `[codex]`
+line and in `structuredContent.ignoredParameters`, and `on_list_tools` writes
+that value into the parameter's description in the `codex` schema.
+`codex-reply` keeps such parameters, because after `resume` they are the
+subcommand's own flags and codex accepts the repeat there.
+`extra_args` is never inspected, so a repeat through it still gets codex's own
+error. Regression tests are in `tests/test_basic.py`.
 
 ### Never let the subprocess inherit the parent's stdin
 

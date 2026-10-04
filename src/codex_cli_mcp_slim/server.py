@@ -20,10 +20,11 @@ import contextlib
 import json
 import logging
 import os
+import shlex
 import signal
 import sys
 from importlib.metadata import version as _pkg_version
-from typing import Any
+from typing import Any, NamedTuple
 
 from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
@@ -49,11 +50,88 @@ _PKG_NAME = "codex-cli-mcp-slim"
 #
 #     uvx codex-cli-mcp-slim -c model_reasoning_effort=high -C /srv/scratch
 #
-# `-c` may repeat and the last one wins, so a per-call `config` can override a server-level
-# `-c`. Single-value flags such as `-m` and `-C` may not repeat: codex rejects the second
-# one, and the tool result carries that error. Keep server-level flags and per-call
-# parameters disjoint for those.
+# `-c` and `--add-dir` may repeat (for `-c` the last one wins), so a per-call `config` can
+# override a server-level `-c`. The flags in _SINGLE_USE_FLAGS may not: see there.
 SERVER_ARGS: list[str] = []
+
+# Per-call parameters whose flag codex accepts only once, with every spelling of that flag.
+# A second occurrence makes `codex exec` exit 2 with "cannot be used multiple times", so when
+# the server's own command line already carries one of these flags, the per-call parameter
+# is left out of argv and the server-level value is used: whoever started the server fixed
+# that configuration on purpose.
+_SINGLE_USE_FLAGS: dict[str, tuple[str, ...]] = {
+    "cd": ("-C", "--cd"),
+    "model": ("-m", "--model"),
+    "sandbox": ("-s", "--sandbox"),
+    "profile": ("-p", "--profile"),
+    "ephemeral": ("--ephemeral",),
+    "skip_git_repo_check": ("--skip-git-repo-check",),
+}
+
+
+# The `codex exec` options (codex-cli 0.159.2) that take the next token as their value, so
+# _params_set_by reads that token as a value and never as a flag of its own.
+_VALUE_FLAGS = frozenset(
+    {
+        *("-c", "--config", "--enable", "--disable", "-i", "--image"),
+        *("-m", "--model", "--local-provider", "-p", "--profile", "-s", "--sandbox"),
+        *("-C", "--cd", "--add-dir", "--thread-source", "--output-schema", "--color"),
+        *("-o", "--output-last-message"),
+    }
+)
+
+
+class _ServerSetting(NamedTuple):
+    """How the server's own command line sets one of the _SINGLE_USE_FLAGS parameters."""
+
+    value: str | bool  # the flag's value, or True for a flag without one
+    written: str  # the flag as that command line spells it, for example `-C /srv`
+
+
+def _params_set_by(server_args: list[str]) -> dict[str, _ServerSetting]:
+    """The _SINGLE_USE_FLAGS parameters whose flag already appears in `server_args`.
+
+    A flag counts in every form codex parses as that flag: `--cd DIR`, `--cd=DIR`, `-C DIR`
+    and the attached short forms `-CDIR` and `-C=DIR`. Short flags are case-sensitive, so the
+    repeatable `-c` is not mistaken for `-C`. The token after a _VALUE_FLAGS option is its
+    value (`-m` in `-c -m` is not the model flag), and nothing after `--` is a flag.
+    """
+    held: dict[str, _ServerSetting] = {}
+    tokens = iter(server_args)
+    for token in tokens:
+        if token == "--":
+            break
+        if token in _VALUE_FLAGS:
+            value = next(tokens, None)
+            if value is None:
+                break
+            param = next((p for p, flags in _SINGLE_USE_FLAGS.items() if token in flags), None)
+            if param is not None:
+                held.setdefault(param, _ServerSetting(value, shlex.join([token, value])))
+            continue
+        for param, spellings in _SINGLE_USE_FLAGS.items():
+            for flag in spellings:
+                if token == flag:
+                    held.setdefault(param, _ServerSetting(True, token))
+                elif len(flag) == 2 and token.startswith(flag):
+                    value = token[2:].removeprefix("=")
+                    held.setdefault(param, _ServerSetting(value, shlex.quote(token)))
+                elif token.startswith(flag + "="):
+                    value = token[len(flag) + 1 :]
+                    held.setdefault(param, _ServerSetting(value, shlex.quote(token)))
+    return held
+
+
+# What SERVER_ARGS sets among the _SINGLE_USE_FLAGS parameters. _set_server_args parses it
+# once, together with SERVER_ARGS, so _build_argv, _invoke and on_list_tools read one answer.
+_SERVER_SET: dict[str, _ServerSetting] = {}
+
+
+def _set_server_args(server_args: list[str]) -> None:
+    global SERVER_ARGS, _SERVER_SET
+    SERVER_ARGS = list(server_args)
+    _SERVER_SET = _params_set_by(SERVER_ARGS)
+
 
 # The Server is built at the bottom of this file: v2 takes the handlers as constructor
 # arguments, so they must already be defined by the time it is constructed.
@@ -73,8 +151,11 @@ def _build_argv(
     extra_args: list[str] | None = None,
     server_args: list[str] | None = None,
 ) -> list[str]:
-    argv: list[str] = [CODEX_CMD, "exec"]
-    argv += SERVER_ARGS if server_args is None else server_args
+    if server_args is None:
+        server_args, server_set = SERVER_ARGS, _SERVER_SET
+    else:
+        server_set = _params_set_by(server_args)
+    argv: list[str] = [CODEX_CMD, "exec", *server_args]
     if thread_id:
         # `codex exec resume <id>` is a subcommand: it has to come before the per-call flags,
         # and it accepts only a subset of them (the `codex-reply` schema advertises just that
@@ -82,21 +163,25 @@ def _build_argv(
         # `exec` options there, so a server pinned to a working directory keeps that
         # directory for replies as well.
         argv += ["resume", thread_id]
-    if cd:
+    # Per-call flags after `resume` are the subcommand's own, and codex accepts them there
+    # even when the same flag sits among the server-level ones, so only a plain `exec` call
+    # leaves out what the server already sets.
+    held = {} if thread_id else server_set
+    if cd and "cd" not in held:
         argv += ["-C", cd]
-    if model:
+    if model and "model" not in held:
         argv += ["-m", model]
     for item in config or []:
         argv += ["-c", item]  # repeatable flag: one -c per key=value
-    if sandbox:
+    if sandbox and "sandbox" not in held:
         argv += ["--sandbox", sandbox]
     for d in add_dir or []:
         argv += ["--add-dir", d]  # repeatable flag: one --add-dir per directory
-    if profile:
+    if profile and "profile" not in held:
         argv += ["-p", profile]
-    if ephemeral:
+    if ephemeral and "ephemeral" not in held:
         argv.append("--ephemeral")
-    if skip_git_repo_check:
+    if skip_git_repo_check and "skip_git_repo_check" not in held:
         argv.append("--skip-git-repo-check")
     if extra_args:
         argv += list(extra_args)
@@ -608,11 +693,33 @@ async def _invoke(arguments: dict[str, Any] | None, *, reply: bool) -> CallToolR
     )
     parsed = _parse_events(result.get("stdout", ""))
     text = _format_result(result)
+    # Name what _build_argv left out, and the value used instead, so a caller does not take a
+    # run in the server's directory (say) for a run in the one it asked for.
+    held = {} if reply else _SERVER_SET
+    dropped = [param for param in _SINGLE_USE_FLAGS if param in held and args.get(param)]
     structured: dict[str, Any] | None = None
     if parsed["thread_id"]:
         # The same shape the deprecated `codex mcp-server` returned, so a client that reads
         # structuredContent.threadId keeps working.
         structured = {"threadId": parsed["thread_id"], "content": _response_text(parsed)}
+    if dropped:
+        lines = [
+            f"{p}={json.dumps(args[p], ensure_ascii=False)}; "
+            f"this server runs with {held[p].written}"
+            for p in dropped
+        ]
+        logger.warning("per-call parameters ignored: %s", " | ".join(lines))
+        text += (
+            "\n\nignored, because this server's own command line already sets the flag "
+            "and codex takes it only once:\n" + "\n".join(lines)
+        )
+        # A client that reads only structuredContent learns it here.
+        structured = {
+            **(structured or {}),
+            "ignoredParameters": [
+                {"name": p, "value": args[p], "serverValue": held[p].value} for p in dropped
+            ],
+        }
     return CallToolResult(
         content=[TextContent(type="text", text=text)],
         structured_content=structured,
@@ -631,7 +738,23 @@ async def codex_reply(arguments: dict[str, Any] | None) -> CallToolResult:
 async def on_list_tools(
     ctx: ServerRequestContext, params: PaginatedRequestParams | None
 ) -> ListToolsResult:
-    return ListToolsResult(tools=[_CODEX_TOOL, _REPLY_TOOL])
+    # The caller cannot see the server's command line, so the `codex` schema says which
+    # parameters it already fixes, rather than inviting values that _build_argv would drop.
+    if not _SERVER_SET:
+        return ListToolsResult(tools=[_CODEX_TOOL, _REPLY_TOOL])
+    props = dict(_CODEX_PROPS)
+    for param, setting in _SERVER_SET.items():
+        props[param] = {
+            **props[param],
+            "description": (
+                f"{props[param]['description']} This server's own command line already "
+                f"sets {setting.written}, so a value passed here is ignored."
+            ),
+        }
+    codex_tool = _CODEX_TOOL.model_copy(
+        update={"input_schema": {**_CODEX_TOOL.input_schema, "properties": props}}
+    )
+    return ListToolsResult(tools=[codex_tool, _REPLY_TOOL])
 
 
 async def on_call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
@@ -691,7 +814,7 @@ def main() -> None:
     if sys.argv[1:] == ["--version"]:
         print(f"{_PKG_NAME} {_pkg_version(_PKG_NAME)}")
         return
-    SERVER_ARGS[:] = sys.argv[1:]
+    _set_server_args(sys.argv[1:])
     asyncio.run(_amain())
 
 
