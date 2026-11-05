@@ -293,6 +293,31 @@ buffered output and reap the process, so the effective ceiling is
 `timeout_seconds + 20`. A timed-out call is flagged `isError` and carries
 whatever `codex` had printed so far.
 
+An MCP client may give up on a call that has sent neither a response nor a
+progress notification for a while. Claude Code 2.1.318 does so after 1800
+seconds by default for a stdio server ("sent no response or progress for
+1800s"), and a long `codex` turn can take longer than that. While `codex` runs,
+the server therefore sends a `notifications/progress` message every 60 seconds,
+so the call lasts until `codex` finishes or `timeout_seconds` runs out. A client
+gets these only when it sent a `progressToken` with the call, as Claude Code
+does; a client that gives up after less than 60 seconds without progress is not
+covered. With the default `timeout_seconds` of 1800 the call still ends after
+about 30 minutes, at the server's own timeout, so to let `codex` run longer,
+raise `timeout_seconds` (30 to 3600 per call) or `$CODEX_CLI_MCP_SLIM_TIMEOUT`,
+which sets the default. In the notification's `params`, `progress` counts the
+notifications sent so far and `message` says how long `codex` has been running:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/progress",
+  "params": {"progressToken": 7, "progress": 2, "message": "codex running for 120s"}
+}
+```
+
+If sending a notification raises an error, the server logs it to stderr and the
+call and its result are unaffected.
+
 ## Forward-compatibility example
 
 If a future `codex exec` release adds a new flag (say `--super-mode`), use it

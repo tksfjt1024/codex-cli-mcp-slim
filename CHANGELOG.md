@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2]
+
+### Added
+- While `codex` runs, the server sends an MCP progress notification every 60 seconds
+  to a client that passed a `progressToken` with the call. A client that aborts a
+  call after a stretch with neither a response nor progress, as Claude Code does
+  after 1800 seconds by default ("sent no response or progress for 1800s"), now
+  waits for a long `codex` turn until it finishes or `timeout_seconds` runs out.
+  `timeout_seconds` still defaults to 1800, so a call that should run longer than 30
+  minutes also needs a larger `timeout_seconds` (30 to 3600 per call) or
+  `$CODEX_CLI_MCP_SLIM_TIMEOUT`, which sets the default. A client that gives up
+  after less than 60 seconds without progress is not covered. In each notification,
+  `progress` counts the notifications and `message` gives the elapsed time
+  (`codex running for 120s`). An error raised while sending a notification is logged
+  to stderr and does not change the run or its result. Tool inputs, results and the
+  default timeout are unchanged.
+
 ## [0.1.1]
 
 ### Fixed
@@ -42,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `codex exec` invocation, so one MCP-client entry can pin a reasoning effort, a
   working directory or a model for all of its calls.
 
-[Unreleased]: https://github.com/tksfjt1024/codex-cli-mcp-slim/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/tksfjt1024/codex-cli-mcp-slim/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/tksfjt1024/codex-cli-mcp-slim/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/tksfjt1024/codex-cli-mcp-slim/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/tksfjt1024/codex-cli-mcp-slim/releases/tag/v0.1.0

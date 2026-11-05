@@ -249,6 +249,50 @@ holding the stdout/stderr pipes open. A descendant that calls
 `setsid()`/`setpgid()` to leave the group is out of reach either way — a
 known limitation, not a bug to fix by walking the process tree.
 
+### Progress notifications keep a long call alive
+
+An MCP client may abort a call that has sent neither a response nor a
+`notifications/progress` for a while; Claude Code does so after 1800 seconds by
+default ("sent no response or progress for 1800s"), and a `codex` turn can run
+longer. `on_call_tool` therefore hands the request-scoped
+`ctx.session.report_progress` down through `codex` / `codex_reply` and
+`_invoke` to `_run_codex`, which runs `_report_progress_every` beside the wait
+for codex: one notification every `PROGRESS_INTERVAL` (60) seconds. The
+interval is a constant on purpose: 60 seconds is far inside Claude Code's limit,
+and a setting would be one more thing to maintain. The SDK sends nothing
+when the call carried no `progressToken`. `progress` counts the notifications,
+because the protocol requires it to rise with each one, and `message` carries
+the elapsed seconds.
+
+The notification task must not change what a run does or returns:
+
+- A notification that raises is logged and the next one is still sent; the
+  exception never reaches the call's result. (The SDK itself drops a
+  notification on a closed transport, with a debug log and no exception.)
+- On success, timeout and cancellation alike, `_run_codex`'s `finally` cancels
+  the progress task and waits for it to finish before the result goes back.
+  Progress must stop once the call completes, and a notification stuck on a
+  client that has stopped reading would otherwise outlive the call.
+- That `finally` cancels the progress task and the `communicate()` task first and
+  only then waits, repeating the wait until both have finished. The SDK delivers
+  a client's cancellation through an anyio cancel scope, which cancels the
+  handler again at every `await`, cleanup included. A single `await` there would
+  be cut short by the next round of cancellation, and if `communicate()` had not
+  been cancelled yet, it would keep running for as long as a descendant outside
+  the process group holds codex's pipes open. The wait (`asyncio.wait`) does not
+  raise the tasks' own `CancelledError`; a cancellation of the call that arrives
+  during the wait is held and raised to the caller once both tasks are done.
+  Regression test:
+  `test_cancellation_through_an_anyio_scope_still_cleans_up_communicate`.
+- The timeout, the process-group kill and the two bounded waits after it are
+  untouched; notifications keep going during those waits.
+
+`ServerRequestContext` itself has no `report_progress` (checked on mcp 2.0.0,
+2.1.1 and 2.3.0); it lives on `ctx.session`, which the SDK builds per request.
+A caller with no request context (a test, a direct call to `codex()`) passes no
+`report_progress` and gets no notifications. Regression tests:
+`tests/test_progress.py`.
+
 ### Don't delete the `communicate_task.done()` narrow-race check in `_run_codex`
 
 If the subprocess finishes at (almost) the exact moment the first

@@ -23,6 +23,7 @@ import os
 import shlex
 import signal
 import sys
+from collections.abc import Awaitable, Callable
 from importlib.metadata import version as _pkg_version
 from typing import Any, NamedTuple
 
@@ -41,6 +42,16 @@ logger = logging.getLogger("codex_cli_mcp_slim")
 
 CODEX_CMD = os.environ.get("CODEX_CMD", "codex")
 DEFAULT_TIMEOUT = int(os.environ.get("CODEX_CLI_MCP_SLIM_TIMEOUT", "1800"))
+
+# Seconds between the progress notifications _run_codex sends while codex runs. An MCP client
+# may abort a call that sends neither a response nor progress for a while (Claude Code does
+# so after 1800s by default: "sent no response or progress for 1800s"), and a long codex turn
+# outlasts that; the notifications are what keeps such a call alive.
+PROGRESS_INTERVAL = 60
+
+# ServerSession.report_progress, or anything called the same way. It does nothing when the
+# client sent no progress token with the call.
+_ReportProgress = Callable[..., Awaitable[None]]
 
 _PKG_NAME = "codex-cli-mcp-slim"
 
@@ -200,6 +211,7 @@ async def _run_codex(
     prompt: str,
     timeout: int,
     env_overrides: dict[str, str] | None = None,
+    report_progress: _ReportProgress | None = None,
 ) -> dict[str, Any]:
     env = os.environ.copy()
     if env_overrides:
@@ -230,6 +242,11 @@ async def _run_codex(
 
     # shield the task so a first-wait timeout doesn't cancel the second wait below
     communicate_task = asyncio.ensure_future(proc.communicate(prompt.encode()))
+    progress_task = (
+        asyncio.ensure_future(_report_progress_every(PROGRESS_INTERVAL, report_progress))
+        if report_progress is not None
+        else None
+    )
     try:
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -268,10 +285,25 @@ async def _run_codex(
         _kill_process_group(proc)
         raise
     finally:
-        if not communicate_task.done():
-            communicate_task.cancel()
-            with contextlib.suppress(Exception, asyncio.CancelledError):
-                await communicate_task
+        # The progress task ends before the result goes back, since the protocol has progress
+        # stop once the call completes; cancelling it also ends a notification stuck on a
+        # client that has stopped reading. Both tasks are cancelled before anything is
+        # awaited, and the wait is repeated until they have finished. The SDK cancels a call
+        # through an anyio cancel scope, which cancels this coroutine again at every await, so
+        # a single await here could be cut short and leave communicate() running for as long
+        # as a descendant outside the process group keeps the pipes open. A cancellation that
+        # arrives during the wait is raised once the tasks are done.
+        leftovers = {t for t in (progress_task, communicate_task) if t is not None and not t.done()}
+        for task in leftovers:
+            task.cancel()
+        interrupted: asyncio.CancelledError | None = None
+        while leftovers := {t for t in leftovers if not t.done()}:
+            try:
+                await asyncio.wait(leftovers)
+            except asyncio.CancelledError as exc:
+                interrupted = exc
+        if interrupted is not None:
+            raise interrupted
 
     return {
         "ok": proc.returncode == 0,
@@ -280,6 +312,27 @@ async def _run_codex(
         "stderr": stderr.decode("utf-8", errors="replace"),
         "argv": argv,
     }
+
+
+async def _report_progress_every(interval: float, report_progress: _ReportProgress) -> None:
+    """Send a progress notification every `interval` seconds until cancelled.
+
+    `progress` counts the notifications, so it rises with each one as the protocol requires;
+    the message carries the time codex has been running. A notification that raises is logged
+    and the next one is still sent: it must not affect the codex run or its result. (The SDK
+    itself drops a notification on a closed transport, with a debug log and no exception.)
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    count = 0
+    while True:
+        await asyncio.sleep(interval)
+        count += 1
+        elapsed = round(loop.time() - started)
+        try:
+            await report_progress(count, message=f"codex running for {elapsed}s")
+        except Exception as exc:
+            logger.warning("progress notification failed: %s: %s", type(exc).__name__, exc)
 
 
 def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
@@ -657,7 +710,12 @@ def _error_result(text: str) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=f"[ERROR] {text}")], is_error=True)
 
 
-async def _invoke(arguments: dict[str, Any] | None, *, reply: bool) -> CallToolResult:
+async def _invoke(
+    arguments: dict[str, Any] | None,
+    *,
+    reply: bool,
+    report_progress: _ReportProgress | None = None,
+) -> CallToolResult:
     """The body of both tools, taking a plain dict so callers need no SDK request object."""
     args = dict(arguments or {})
 
@@ -690,6 +748,7 @@ async def _invoke(arguments: dict[str, Any] | None, *, reply: bool) -> CallToolR
         prompt=args["prompt"],
         timeout=int(args.get("timeout_seconds") or DEFAULT_TIMEOUT),
         env_overrides=args.get("env"),
+        report_progress=report_progress,
     )
     parsed = _parse_events(result.get("stdout", ""))
     text = _format_result(result)
@@ -727,12 +786,16 @@ async def _invoke(arguments: dict[str, Any] | None, *, reply: bool) -> CallToolR
     )
 
 
-async def codex(arguments: dict[str, Any] | None) -> CallToolResult:
-    return await _invoke(arguments, reply=False)
+async def codex(
+    arguments: dict[str, Any] | None, *, report_progress: _ReportProgress | None = None
+) -> CallToolResult:
+    return await _invoke(arguments, reply=False, report_progress=report_progress)
 
 
-async def codex_reply(arguments: dict[str, Any] | None) -> CallToolResult:
-    return await _invoke(arguments, reply=True)
+async def codex_reply(
+    arguments: dict[str, Any] | None, *, report_progress: _ReportProgress | None = None
+) -> CallToolResult:
+    return await _invoke(arguments, reply=True, report_progress=report_progress)
 
 
 async def on_list_tools(
@@ -757,15 +820,20 @@ async def on_list_tools(
     return ListToolsResult(tools=[codex_tool, _REPLY_TOOL])
 
 
-async def on_call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
+async def on_call_tool(
+    ctx: ServerRequestContext | None, params: CallToolRequestParams
+) -> CallToolResult:
     # An escaping exception would become a JSON-RPC error, which clients treat as a transport
     # failure rather than as something to show the model. CancelledError derives from
     # BaseException, so peer cancellation still propagates and _run_codex's killpg still runs.
+    # The session is scoped to this request, so its progress goes out against this call's
+    # token. Tests and direct callers pass no context; such a call simply sends no progress.
+    report_progress = ctx.session.report_progress if ctx is not None else None
     try:
         if params.name == "codex":
-            return await codex(params.arguments)
+            return await codex(params.arguments, report_progress=report_progress)
         if params.name == "codex-reply":
-            return await codex_reply(params.arguments)
+            return await codex_reply(params.arguments, report_progress=report_progress)
         return _error_result(f"unknown tool: {params.name}")
     except Exception as exc:
         logger.exception("%s failed", params.name)
