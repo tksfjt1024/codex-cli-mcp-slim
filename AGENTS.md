@@ -201,6 +201,28 @@ subcommand's own flags and codex accepts the repeat there.
 `extra_args` is never inspected, so a repeat through it still gets codex's own
 error. Regression tests are in `tests/test_basic.py`.
 
+### `readOnlyHint` is opt-in, and covers every tool when on
+
+`$CODEX_CLI_MCP_SLIM_READ_ONLY_HINT` (`_read_only_hint_enabled`) makes `on_list_tools`
+add `annotations.readOnlyHint = true` to **both** tools. It is a variable and not a
+server flag because everything on the server's command line goes to `codex exec`
+verbatim (see "Server-level flags"); a flag of this server's own would be an exception
+to that on top of `--help` and `--version`, and the environment variables are where
+`$CODEX_CLI_MCP_SLIM_TIMEOUT` and `$CODEX_CLI_MCP_SLIM_LOG_LEVEL` already sit.
+
+It is off by default because the declaration is stronger than the behaviour: MCP defines
+it as "does not modify its environment", and `codex` writes inside its sandbox. Claude
+Code (2.1.326) runs adjacent calls concurrently only when each declares the hint, and
+runs a call without it on its own, which is the one reason to turn it on; it may
+also use the same declaration for permission decisions, which this project has not
+checked. Do not make it the default, and do not declare only `codex`: a `codex` call
+beside an undeclared `codex-reply` runs one after the other. Only `readOnlyHint` is set:
+the MCP specification says `destructiveHint` and `idempotentHint` are meaningful only
+when `readOnlyHint` is false, so they add nothing next to it, and `openWorldHint` (default
+true) says whether the tool reaches an open world, which this setting is not about. An
+unrecognised value raises at startup rather than reading as off. Regression tests:
+`tests/test_read_only_hint.py`, including ones that start the server over stdio.
+
 ### Never let the subprocess inherit the parent's stdin
 
 When the server runs over the **MCP stdio transport**, the parent process's

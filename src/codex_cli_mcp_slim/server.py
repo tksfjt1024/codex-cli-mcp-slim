@@ -36,12 +36,15 @@ from mcp.types import (
     PaginatedRequestParams,
     TextContent,
     Tool,
+    ToolAnnotations,
 )
 
 logger = logging.getLogger("codex_cli_mcp_slim")
 
 CODEX_CMD = os.environ.get("CODEX_CMD", "codex")
 DEFAULT_TIMEOUT = int(os.environ.get("CODEX_CLI_MCP_SLIM_TIMEOUT", "1800"))
+
+_READ_ONLY_HINT_ENV = "CODEX_CLI_MCP_SLIM_READ_ONLY_HINT"
 
 # Seconds between the progress notifications _run_codex sends while codex runs. An MCP client
 # may abort a call that sends neither a response nor progress for a while (Claude Code does
@@ -798,13 +801,43 @@ async def codex_reply(
     return await _invoke(arguments, reply=True, report_progress=report_progress)
 
 
+def _read_only_hint_enabled() -> bool:
+    """Whether $CODEX_CLI_MCP_SLIM_READ_ONLY_HINT asks for `readOnlyHint: true` on the tools.
+
+    `1` or `true` turns it on; unset, empty, `0` or `false` leaves it off. Anything else
+    raises, so a typo does not silently leave the declaration off. _amain() calls this before
+    serving, so the error appears at startup rather than on the first tool listing.
+
+    Claude Code runs adjacent tool calls concurrently only when each declares
+    `readOnlyHint: true`, and the hint is off by default because it is stronger than what
+    these tools do: `codex` can write inside its sandbox.
+    """
+    raw = os.environ.get(_READ_ONLY_HINT_ENV, "").strip().lower()
+    if raw in ("", "0", "false"):
+        return False
+    if raw in ("1", "true"):
+        return True
+    raise ValueError(f"${_READ_ONLY_HINT_ENV} must be 1, true, 0 or false, not {raw!r}")
+
+
 async def on_list_tools(
     ctx: ServerRequestContext, params: PaginatedRequestParams | None
 ) -> ListToolsResult:
+    tools = _listed_codex_tools()
+    if _read_only_hint_enabled():
+        # Every tool, not just `codex`: the client groups consecutive concurrency-safe calls
+        # into one run, so a `codex` call next to a `codex-reply` call that lacks the hint
+        # would still run one after the other.
+        annotations = ToolAnnotations(read_only_hint=True)
+        tools = [tool.model_copy(update={"annotations": annotations}) for tool in tools]
+    return ListToolsResult(tools=tools)
+
+
+def _listed_codex_tools() -> list[Tool]:
     # The caller cannot see the server's command line, so the `codex` schema says which
     # parameters it already fixes, rather than inviting values that _build_argv would drop.
     if not _SERVER_SET:
-        return ListToolsResult(tools=[_CODEX_TOOL, _REPLY_TOOL])
+        return [_CODEX_TOOL, _REPLY_TOOL]
     props = dict(_CODEX_PROPS)
     for param, setting in _SERVER_SET.items():
         props[param] = {
@@ -817,7 +850,7 @@ async def on_list_tools(
     codex_tool = _CODEX_TOOL.model_copy(
         update={"input_schema": {**_CODEX_TOOL.input_schema, "properties": props}}
     )
-    return ListToolsResult(tools=[codex_tool, _REPLY_TOOL])
+    return [codex_tool, _REPLY_TOOL]
 
 
 async def on_call_tool(
@@ -860,6 +893,8 @@ async def _amain() -> None:
     )
     if SERVER_ARGS:
         logger.info("server-level codex exec flags: %s", SERVER_ARGS)
+    if _read_only_hint_enabled():
+        logger.info("declaring readOnlyHint=true on every tool (%s)", _READ_ONLY_HINT_ENV)
     async with stdio_server() as (read, write):
         await server.run(read, write, server.create_initialization_options())
 

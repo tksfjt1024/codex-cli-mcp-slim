@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3]
+
+### Added
+- `CODEX_CLI_MCP_SLIM_READ_ONLY_HINT=1` (or `true`, case does not matter) makes the
+  server list `codex` and `codex-reply` with `annotations: {"readOnlyHint": true}`.
+  Claude Code (2.1.326) runs adjacent MCP tool calls concurrently only when each of
+  their tools declares `readOnlyHint`, and runs a call to a tool without it on its own,
+  so several `codex` calls placed in one response run one after another. Both tools get
+  the hint, so a `codex` call and a `codex-reply` call next to each other can run
+  concurrently; no other annotation is added. Without the variable, or with `0`, `false` or
+  an empty value, the tool list is unchanged; any other value makes the server exit at
+  startup. The declaration says the tool does not modify its environment, which is
+  stronger than what `codex` does under a writable sandbox, and a client may use the
+  same declaration for other decisions, such as asking before a call. The README says
+  what to check before turning it on.
+
 ## [0.1.2]
 
 ### Added
@@ -59,7 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `codex exec` invocation, so one MCP-client entry can pin a reasoning effort, a
   working directory or a model for all of its calls.
 
-[Unreleased]: https://github.com/tksfjt1024/codex-cli-mcp-slim/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/tksfjt1024/codex-cli-mcp-slim/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/tksfjt1024/codex-cli-mcp-slim/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/tksfjt1024/codex-cli-mcp-slim/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/tksfjt1024/codex-cli-mcp-slim/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/tksfjt1024/codex-cli-mcp-slim/releases/tag/v0.1.0

@@ -333,13 +333,64 @@ immediately without updating this server:
 }
 ```
 
+## Letting the client run calls concurrently (`readOnlyHint`)
+
+Claude Code (2.1.326) runs calls to tools that declare `readOnlyHint: true`
+concurrently with each other when they are next to each other in one response. A
+call to a tool without the declaration runs on its own, after the calls before it
+have finished, so several `codex` calls placed in one response wait for each other.
+This server does not make the declaration by default. Set
+`CODEX_CLI_MCP_SLIM_READ_ONLY_HINT=1` in the entry's `env` block to have it list both
+`codex` and `codex-reply` with `annotations: {"readOnlyHint": true}` (and no other
+annotation):
+
+```json
+{
+  "mcpServers": {
+    "codex": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["codex-cli-mcp-slim"],
+      "env": { "CODEX_CLI_MCP_SLIM_READ_ONLY_HINT": "1" }
+    }
+  }
+}
+```
+
+Both tools get the hint because the client groups calls that are next to each other: a
+`codex` call beside a `codex-reply` call without the hint would still run one after the
+other. The value is `1` or `true` to turn it on and `0`, `false` or an empty string
+to leave it off (case does not matter); any other value makes the server exit at
+startup. Without the variable, the tool list is unchanged.
+
+Read this before turning it on:
+
+- **The declaration is stronger than what `codex` does.** The MCP specification defines
+  `readOnlyHint: true` as "the tool does not modify its environment". `codex` is an
+  agentic assistant: under `workspace-write` or `danger-full-access` it edits files and
+  runs commands. The sandbox mode comes from the server's own `--sandbox`, the call's
+  `sandbox` parameter or `config.toml`, and `codex exec` runs read-only when none of
+  them sets it. Claude Code's documentation also describes the hint as "the tool changes
+  nothing"; this setting is for the concurrency, not because the tool is read-only.
+  Concurrent `codex` calls that write to the same working directory can interfere with
+  each other.
+- **The client may use the same declaration for more than concurrency.** Claude Code's
+  documentation describes what the hint does for retrying a call after a dropped
+  connection and for concurrency, and does not say whether the declaration also affects
+  its permission decisions; this project has not checked that. The MCP specification
+  says clients should never make tool use decisions based on annotations from untrusted
+  servers, and other clients may read the hint when they decide whether to ask you
+  before a call. Check your client's documentation before enabling it for a server that
+  can write.
+
 ## Configuration
 
-| Environment variable           | Default | Purpose                                  |
-| ------------------------------ | ------- | ---------------------------------------- |
-| `CODEX_CMD`                    | `codex` | Path to the `codex` CLI binary           |
-| `CODEX_CLI_MCP_SLIM_TIMEOUT`   | `1800`  | Default subprocess timeout in seconds    |
-| `CODEX_CLI_MCP_SLIM_LOG_LEVEL` | `INFO`  | Logging level for stderr diagnostics     |
+| Environment variable                 | Default | Purpose                                                          |
+| ------------------------------------ | ------- | ---------------------------------------------------------------- |
+| `CODEX_CMD`                          | `codex` | Path to the `codex` CLI binary                                   |
+| `CODEX_CLI_MCP_SLIM_TIMEOUT`         | `1800`  | Default subprocess timeout in seconds                            |
+| `CODEX_CLI_MCP_SLIM_LOG_LEVEL`       | `INFO`  | Logging level for stderr diagnostics                             |
+| `CODEX_CLI_MCP_SLIM_READ_ONLY_HINT`  | off     | `1` or `true` lists the tools with `readOnlyHint: true` (above)  |
 
 `codex` itself reads its configuration file and credentials from `$CODEX_HOME`
 (`~/.codex` by default), so an MCP-client entry can point a server at a
